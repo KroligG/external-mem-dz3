@@ -10,30 +10,56 @@ const elem_t LAST_ELEM = UINT32_MAX;
 const elem_t END_OF_STREAM = 0;
 
 const size_t B = 10000000;
-const size_t B_BYTES = B * elemSize;
-const size_t M_BYTES = 1 * 1024 * 1024 * 1536; //1.5GB
+//const size_t M_BYTES = 1 * 1024 * 1024 * 1536; //1.5GB
+const size_t M_BYTES = 1 * 1024 * 1024 * elemSize;
 const size_t M = M_BYTES / elemSize;
 
 class Layers {
 
 public:
     Layers(size_t s) : s(s) {
+        layers.push_back(vector<elem_t>(s));
+        firstLayerIndex = 0;
     }
 
     virtual ~Layers() {
     }
 
-    void add(vector<elem_t> elems) {
-        if (elems.size() != s) {
-            throw "Wrong layer size";
+    void add(elem_t elem) {
+        vector<elem_t> &first = layers[0];
+        first[firstLayerIndex++] = elem;
+        if (firstLayerIndex == s) {
+            addLayer(filterElems(first), 1);
+            firstLayerIndex = 0;
         }
-        sort(elems.begin(), elems.end());
-        vector<elem_t> filteredElems = filterElems(elems);
-        addLayer(filteredElems, 0);
     }
 
     vector<elem_t> flush() {
-
+        if (firstLayerIndex > 0) {
+            vector<elem_t> &first = layers[0];
+            while (firstLayerIndex != s) {
+                first[firstLayerIndex++] = LAST_ELEM;
+            }
+            addLayer(filterElems(first), 1);
+            firstLayerIndex = 0;
+        }
+        for (size_t i = 1; i < layers.size(); ++i) {
+            vector<elem_t> &layer = layers[i];
+            if (layer.size() == 0) continue;
+            if (layer.size() == s / 2) {
+                layer.insert(layer.end(), s / 2, LAST_ELEM);
+                addLayer(filterElems(layer), i + 1);
+                layers[i] = vector<elem_t>();
+            } else {
+                throw "Layer size is invalid";
+            }
+        }
+        vector<elem_t> &last = layers[layers.size() - 1];
+        if(last.size() == s / 2) {
+            last.insert(last.end(), s / 2, LAST_ELEM);
+        }
+        if(last.size() != s) throw "Last level has wrong size";
+        return last;
     }
 
     size_t size() {
@@ -55,6 +81,7 @@ public:
 private:
     vector<vector<elem_t>> layers;
     size_t s;
+    size_t firstLayerIndex;
 
     void addLayer(vector<elem_t> elems, size_t layer_num) {
         if (layers.size() < layer_num) {
@@ -97,28 +124,30 @@ private:
     }
 };
 
-void execute_pass(BigFile<elem_t> stream, elem_t *first, elem_t *last, size_t *count) {
+void execute_pass(BigFile<elem_t> stream, elem_t prev_first, size_t k, elem_t *first, elem_t *last, size_t *count) {
     uint64_t N = stream.get_N();
-    size_t s = (size_t) (M / log(N));
+    size_t s = (((size_t) (M / log(N))) / 2) * 2;
     Layers layers(s);
     stream.startRead();
     elem_t elem;
-    vector<elem_t> elems(s, LAST_ELEM);
-    size_t i = 0;
+    *count = 0;
     while ((elem = stream.read()) != END_OF_STREAM) {
         if (elem < *first || elem > *last) {
             continue;
         }
-        elems[i++] = elem;
-        (*count)++;
-        if (i == s) {
-            layers.add(elems);
-            elems = vector<elem_t>(s, LAST_ELEM);
-            i = 0;
+        if(elem > prev_first && elem < *first) {
+            (*count)++;
         }
+        layers.add(elem);
     }
-    layers.add(elems);
     stream.finishRead();
+    vector<elem_t> result = layers.flush();
+    size_t t = layers.size();
+    double t2 = pow(2.0, t);
+    size_t l = (size_t) (floor(k / t2)) - t;
+    size_t u = (size_t) ceil(k / t2);
+    *first = result[l];
+    *last = result[u];
 }
 
 elem_t inmemory_k_seq(BigFile<elem_t> stream, elem_t first, elem_t last, size_t k) {
@@ -138,14 +167,26 @@ elem_t inmemory_k_seq(BigFile<elem_t> stream, elem_t first, elem_t last, size_t 
 elem_t find_k_seq(BigFile<elem_t> stream, size_t k) {
     elem_t first = 0;
     elem_t last = LAST_ELEM;
-    size_t count = 0;
-    execute_pass(stream, &first, &last, &count);
+    size_t count;
+    execute_pass(stream, first, k, &first, &last, &count);
+    k -= count;
     elem_t k_seq = inmemory_k_seq(stream, first, last, k);
     return k_seq;
 }
 
+void writeTestFile(string name, size_t size) {
+    BigFile<elem_t> test(name, false, B);
+    test.startWrite(0);
+    for (int i = 1; i < size; ++i) {
+        test.write((elem_t) i);
+    }
+    test.write(END_OF_STREAM);
+    test.finishWrite();
+}
+
 int main(int argc, char **argv) {
-    char *filename = argv[1];
+    string filename = argv[1];
+    writeTestFile(filename, 10000000);
     size_t k = (size_t) atoi(argv[2]);
     BigFile<elem_t> stream(filename, false, B);
     elem_t k_seq = find_k_seq(stream, k);
